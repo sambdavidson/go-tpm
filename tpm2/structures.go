@@ -63,8 +63,9 @@ type Public struct {
 	// If Type is AlgKeyedHash, then do not set these.
 	// Otherwise, only one of the Parameters fields should be set. When encoding/decoding,
 	// one will be picked based on Type.
-	RSAParameters *RSAParams
-	ECCParameters *ECCParams
+	RSAParameters       *RSAParams
+	ECCParameters       *ECCParams
+	SymCipherParameters *SymCipherParams
 }
 
 // Encode serializes a Public structure in TPM wire format.
@@ -84,11 +85,13 @@ func (p Public) Encode() ([]byte, error) {
 		params, err = tpmutil.Pack(AlgNull, unique)
 	case AlgECC:
 		params, err = p.ECCParameters.encode()
+	case AlgSymCipher:
+		params, err = p.SymCipherParameters.encode()
 	default:
-		err = fmt.Errorf("unsupported type in TPMT_PUBLIC: %v", p.Type)
+		err = fmt.Errorf("unsupported type in TPMT_PUBLIC: 0x%x", p.Type)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("encoding RSAParameters, ECCParameters or KeyedHash: %v", err)
+		return nil, fmt.Errorf("encoding RSAParameters, ECCParameters, SymCipherParameters or KeyedHash: %v", err)
 	}
 	return concat(head, params)
 }
@@ -132,8 +135,10 @@ func DecodePublic(buf []byte) (Public, error) {
 		pub.RSAParameters, err = decodeRSAParams(in)
 	case AlgECC:
 		pub.ECCParameters, err = decodeECCParams(in)
+	case AlgSymCipher:
+		pub.SymCipherParameters, err = decodeSymCipherParams(in)
 	default:
-		err = fmt.Errorf("unsupported type in TPMT_PUBLIC: %v", pub.Type)
+		err = fmt.Errorf("unsupported type in TPMT_PUBLIC: 0x%x", pub.Type)
 	}
 	return pub, err
 }
@@ -303,6 +308,37 @@ func decodeECCParams(in *bytes.Buffer) (*ECCParams, error) {
 	return &params, nil
 }
 
+// SymCipherParams represents parameters of a symmetric block cipher TPM object.
+type SymCipherParams struct {
+	Symmetric *SymScheme
+	Unique    []byte
+}
+
+func (p *SymCipherParams) encode() ([]byte, error) {
+	sym, err := p.Symmetric.encode()
+	if err != nil {
+		return nil, fmt.Errorf("encoding Symmetric: %v", err)
+	}
+	unique, err := tpmutil.Pack(p.Unique)
+	if err != nil {
+		return nil, fmt.Errorf("encoding Unique: %v", err)
+	}
+	return concat(sym, unique)
+}
+
+func decodeSymCipherParams(in *bytes.Buffer) (*SymCipherParams, error) {
+	var params SymCipherParams
+	var err error
+
+	if params.Symmetric, err = decodeSymScheme(in); err != nil {
+		return nil, fmt.Errorf("decoding Symmetric: %v", err)
+	}
+	if err := tpmutil.UnpackBuf(in, &params.Unique); err != nil {
+		return nil, fmt.Errorf("decoding Unique: %v", err)
+	}
+	return &params, nil
+}
+
 // SymScheme represents a symmetric encryption scheme.
 type SymScheme struct {
 	Alg     Algorithm
@@ -329,6 +365,22 @@ func decodeSymScheme(in *bytes.Buffer) (*SymScheme, error) {
 		return nil, fmt.Errorf("decoding KeyBits, Mode: %v", err)
 	}
 	return &scheme, nil
+}
+
+// AsymScheme represents am asymmetric encryption scheme.
+type AsymScheme struct {
+	Alg  Algorithm
+	Hash Algorithm
+}
+
+func (s *AsymScheme) encode() ([]byte, error) {
+	if s == nil || s.Alg.IsNull() {
+		return tpmutil.Pack(AlgNull)
+	}
+	if s.Alg.UsesHash() {
+		return tpmutil.Pack(s.Alg, s.Hash)
+	}
+	return tpmutil.Pack(s.Alg)
 }
 
 // SigScheme represents a signing scheme.
@@ -408,7 +460,7 @@ func decodeSignature(in *bytes.Buffer) (*Signature, error) {
 		return nil, fmt.Errorf("decoding Alg: %v", err)
 	}
 	switch sig.Alg {
-	case AlgRSASSA:
+	case AlgRSASSA, AlgRSAPSS:
 		sig.RSA = new(SignatureRSA)
 		if err := tpmutil.UnpackBuf(in, sig.RSA); err != nil {
 			return nil, fmt.Errorf("decoding RSA: %v", err)

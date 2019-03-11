@@ -29,6 +29,11 @@ func init() {
 	tpmutil.UseTPM20LengthPrefixSize()
 }
 
+// MAX_DIGEST_BUFFER is the maximum size of []byte request or response fields.
+// Typically used for chunking of big blobs of data (such as for hashing or
+// encryption).
+const maxDigestBuffer = 1024
+
 // Algorithm represents a TPM_ALG_ID value.
 type Algorithm uint16
 
@@ -40,6 +45,11 @@ func (a Algorithm) IsNull() bool {
 // UsesCount returns true if a signature algorithm uses count value.
 func (a Algorithm) UsesCount() bool {
 	return a == AlgECDAA
+}
+
+// UsesHash returns true if the algorithm requires the use of a hash.
+func (a Algorithm) UsesHash() bool {
+	return a == AlgOAEP
 }
 
 // HashConstructor returns a function that can be used to make a
@@ -73,6 +83,7 @@ const (
 	AlgECDAA     Algorithm = 0x001A
 	AlgKDF2      Algorithm = 0x0021
 	AlgECC       Algorithm = 0x0023
+	AlgSymCipher Algorithm = 0x0025
 	AlgCTR       Algorithm = 0x0040
 	AlgOFB       Algorithm = 0x0041
 	AlgCBC       Algorithm = 0x0042
@@ -109,6 +120,7 @@ const (
 // SessionAttributes represents an attribute of a session.
 type SessionAttributes byte
 
+// Session Attributes (Structures 8.4 TPMA_SESSION)
 const (
 	AttrContinueSession SessionAttributes = 1 << iota
 	AttrAuditExclusive
@@ -270,15 +282,18 @@ const (
 	cmdCreate           tpmutil.Command = 0x00000153
 	cmdLoad             tpmutil.Command = 0x00000157
 	cmdQuote            tpmutil.Command = 0x00000158
+	cmdRSADecrypt       tpmutil.Command = 0x00000159
 	cmdSign             tpmutil.Command = 0x0000015D
 	cmdUnseal           tpmutil.Command = 0x0000015E
 	cmdContextLoad      tpmutil.Command = 0x00000161
 	cmdContextSave      tpmutil.Command = 0x00000162
+	cmdEncryptDecrypt   tpmutil.Command = 0x00000164
 	cmdFlushContext     tpmutil.Command = 0x00000165
 	cmdLoadExternal     tpmutil.Command = 0x00000167
 	cmdMakeCredential   tpmutil.Command = 0x00000168
 	cmdReadPublicNV     tpmutil.Command = 0x00000169
 	cmdReadPublic       tpmutil.Command = 0x00000173
+	cmdRSAEncrypt       tpmutil.Command = 0x00000174
 	cmdStartAuthSession tpmutil.Command = 0x00000176
 	cmdGetCapability    tpmutil.Command = 0x0000017A
 	cmdGetRandom        tpmutil.Command = 0x0000017B
@@ -291,6 +306,7 @@ const (
 	cmdPCRExtend       tpmutil.Command = 0x00000182
 	cmdPolicyGetDigest tpmutil.Command = 0x00000189
 	cmdPolicyPassword  tpmutil.Command = 0x0000018C
+	cmdEncryptDecrypt2 tpmutil.Command = 0x00000193
 )
 
 // Regular TPM 2.0 devices use 24-bit mask (3 bytes) for PCR selection.

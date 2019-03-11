@@ -57,7 +57,24 @@ func openTPM(t testing.TB) io.ReadWriteCloser {
 		conn.Close()
 		t.Fatalf("Startup TPM failed: %v", err)
 	}
-	return conn
+	return simulator{conn}
+}
+
+// Simulator is a wrapper around a simulator connection that ensures shutdown is called on close.
+// This is only necessary with simulators. If shutdown isn't called before disconnecting, the
+// lockout counter in the simulator is incremented leading to DA lockout after running a few tests.
+type simulator struct {
+	*mssim.Conn
+}
+
+// Close calls Shutdown() on the simulator before disconnecting to ensure the lockout counter doesn't
+// get incremented.
+func (s simulator) Close() error {
+	if err := Shutdown(s, StartupClear); err != nil {
+		s.Conn.Close()
+		return err
+	}
+	return s.Conn.Close()
 }
 
 var (
@@ -639,8 +656,17 @@ func TestSign(t *testing.T) {
 		}
 		switch signerPub := signerPub.(type) {
 		case *rsa.PublicKey:
-			if err := rsa.VerifyPKCS1v15(signerPub, crypto.SHA256, digest[:], sig.RSA.Signature); err != nil {
-				t.Errorf("Signature verification failed: %v", err)
+			switch scheme.Alg {
+			case AlgRSASSA:
+				if err := rsa.VerifyPKCS1v15(signerPub, crypto.SHA256, digest[:], sig.RSA.Signature); err != nil {
+					t.Errorf("Signature verification failed: %v", err)
+				}
+			case AlgRSAPSS:
+				if err := rsa.VerifyPSS(signerPub, crypto.SHA256, digest[:], sig.RSA.Signature, nil); err != nil {
+					t.Errorf("Signature verification failed: %v", err)
+				}
+			default:
+				t.Errorf("unsupported signature algorithm 0x%x", scheme.Alg)
 			}
 		case *ecdsa.PublicKey:
 			if !ecdsa.Verify(signerPub, digest[:], sig.ECC.R, sig.ECC.S) {
@@ -649,7 +675,7 @@ func TestSign(t *testing.T) {
 		}
 	}
 
-	t.Run("RSA", func(t *testing.T) {
+	t.Run("RSA SSA", func(t *testing.T) {
 		run(t, Public{
 			Type:       AlgRSA,
 			NameAlg:    AlgSHA256,
@@ -657,6 +683,21 @@ func TestSign(t *testing.T) {
 			RSAParameters: &RSAParams{
 				Sign: &SigScheme{
 					Alg:  AlgRSASSA,
+					Hash: AlgSHA256,
+				},
+				KeyBits: 2048,
+				Modulus: big.NewInt(0),
+			},
+		})
+	})
+	t.Run("RSA PSS", func(t *testing.T) {
+		run(t, Public{
+			Type:       AlgRSA,
+			NameAlg:    AlgSHA256,
+			Attributes: FlagSign | FlagSensitiveDataOrigin | FlagUserWithAuth,
+			RSAParameters: &RSAParams{
+				Sign: &SigScheme{
+					Alg:  AlgRSAPSS,
 					Hash: AlgSHA256,
 				},
 				KeyBits: 2048,
@@ -905,7 +946,6 @@ func TestEncodeDecodeCreationData(t *testing.T) {
 		t.Errorf("got decoded value:\n%v\nwant:\n%v", decoded, cd)
 	}
 }
-
 func TestCreateAndCertifyCreation(t *testing.T) {
 	rw := openTPM(t)
 	defer rw.Close()
@@ -1163,4 +1203,134 @@ func TestReadPublicKey(t *testing.T) {
 		}
 		run(t, public, private, &pk.PublicKey)
 	})
+}
+
+func TestEncryptDecrypt(t *testing.T) {
+	rw := openTPM(t)
+	defer rw.Close()
+
+	parentHandle, _, err := CreatePrimary(rw, HandleOwner, pcrSelection, emptyPassword, defaultPassword, Public{
+		Type:       AlgRSA,
+		NameAlg:    AlgSHA256,
+		Attributes: FlagRestricted | FlagDecrypt | FlagUserWithAuth | FlagFixedParent | FlagFixedTPM | FlagSensitiveDataOrigin,
+		RSAParameters: &RSAParams{
+			Symmetric: &SymScheme{
+				Alg:     AlgAES,
+				KeyBits: 128,
+				Mode:    AlgCFB,
+			},
+			KeyBits: 2048,
+			Modulus: big.NewInt(0),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrimary failed: %s", err)
+	}
+	defer FlushContext(rw, parentHandle)
+	privateBlob, publicBlob, err := CreateKey(rw, parentHandle, pcrSelection, defaultPassword, defaultPassword, Public{
+		Type:       AlgSymCipher,
+		NameAlg:    AlgSHA256,
+		Attributes: FlagDecrypt | FlagSign | FlagUserWithAuth | FlagFixedParent | FlagFixedTPM | FlagSensitiveDataOrigin,
+		SymCipherParameters: &SymCipherParams{
+			Symmetric: &SymScheme{
+				Alg:     AlgAES,
+				KeyBits: 128,
+				Mode:    AlgCFB,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateKey failed: %s", err)
+	}
+	key, _, err := Load(rw, parentHandle, defaultPassword, publicBlob, privateBlob)
+	if err != nil {
+		t.Fatalf("Load failed: %s", err)
+	}
+	defer FlushContext(rw, key)
+
+	data := bytes.Repeat([]byte("a"), 1e4) // 10KB
+	iv := make([]byte, 16)
+
+	encrypted, err := EncryptSymmetric(rw, defaultPassword, key, iv, data)
+	if err != nil {
+		t.Fatalf("EncryptSymmetric failed: %s", err)
+	}
+	if bytes.Equal(encrypted, data) {
+		t.Error("encrypted blob matches unenecrypted data")
+	}
+	decrypted, err := DecryptSymmetric(rw, defaultPassword, key, iv, encrypted)
+	if err != nil {
+		t.Fatalf("DecryptSymmetric failed: %s", err)
+	}
+	if !bytes.Equal(decrypted, data) {
+		t.Errorf("got decrypted data: %q, want: %q", decrypted, data)
+	}
+}
+
+func TestRSAEncryptDecrypt(t *testing.T) {
+	rw := openTPM(t)
+	defer rw.Close()
+
+	handle, _, err := CreatePrimary(rw, HandleOwner, pcrSelection, emptyPassword, defaultPassword, Public{
+		Type:       AlgRSA,
+		NameAlg:    AlgSHA256,
+		Attributes: FlagDecrypt | FlagUserWithAuth | FlagFixedParent | FlagFixedTPM | FlagSensitiveDataOrigin,
+		RSAParameters: &RSAParams{
+			Sign: &SigScheme{
+				Alg:  AlgNull,
+				Hash: AlgNull,
+			},
+			KeyBits: 2048,
+			Modulus: big.NewInt(0),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrimary failed: %s", err)
+	}
+	defer FlushContext(rw, handle)
+
+	tests := map[string]struct {
+		scheme *AsymScheme
+		data   []byte
+		label  string
+	}{
+		"No padding": {
+			scheme: &AsymScheme{Alg: AlgNull},
+			data:   bytes.Repeat([]byte("a"), 256),
+		},
+		"RSAES-PKCS1": {
+			scheme: &AsymScheme{Alg: AlgRSAES},
+			data:   bytes.Repeat([]byte("a"), 245),
+		},
+		"RSAES-OAEP-SHA1": {
+			scheme: &AsymScheme{Alg: AlgOAEP, Hash: AlgSHA1},
+			data:   bytes.Repeat([]byte("a"), 214),
+		},
+		"RSAES-OAEP-SHA256": {
+			scheme: &AsymScheme{Alg: AlgOAEP, Hash: AlgSHA256},
+			data:   bytes.Repeat([]byte("a"), 190),
+		},
+		"RSAES-OAEP-SHA256 with label": {
+			scheme: &AsymScheme{Alg: AlgOAEP, Hash: AlgSHA256},
+			data:   bytes.Repeat([]byte("a"), 190),
+			label:  "label",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			encrypted, err := RSAEncrypt(rw, handle, test.data, test.scheme, test.label)
+			if err != nil {
+				t.Fatal("RSAEncrypt failed:", err)
+			}
+			decrypted, err := RSADecrypt(rw, handle, defaultPassword, encrypted, test.scheme, test.label)
+			if err != nil {
+				t.Fatal("RSADecrypt failed:", err)
+			}
+			if !bytes.Equal(decrypted, test.data) {
+				t.Errorf("got decrypted data: %q, want: %q", decrypted, test.data)
+			}
+		})
+	}
+
 }
