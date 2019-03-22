@@ -1167,6 +1167,19 @@ func Hash(rw io.ReadWriter, alg Algorithm, buf []byte) ([]byte, error) {
 	return digest, nil
 }
 
+// HMAC computes a Hashed Message Authentication Code for the input data buf.
+func HMAC(rw io.ReadWriter, key tpmutil.Handle, buf []byte, alg Algorithm) ([]byte, error) {
+	resp, err := runCommand(rw, TagNoSessions, cmdHMAC, key, buf, alg)
+	if err != nil {
+		return nil, err
+	}
+	var digest []byte
+	if _, err = tpmutil.Unpack(resp, &digest); err != nil {
+		return nil, err
+	}
+	return digest, nil
+}
+
 // Startup initializes a TPM (usually done by the OS).
 func Startup(rw io.ReadWriter, typ StartupType) error {
 	_, err := runCommand(rw, TagNoSessions, cmdStartup, typ)

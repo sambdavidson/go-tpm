@@ -379,6 +379,60 @@ func TestHash(t *testing.T) {
 	}
 }
 
+func TestHMAC(t *testing.T) {
+	rw := openTPM(t)
+	defer rw.Close()
+
+	parentHandle, _, err := CreatePrimary(rw, HandleOwner, pcrSelection, emptyPassword, defaultPassword, Public{
+		Type:       AlgRSA,
+		NameAlg:    AlgSHA256,
+		Attributes: FlagRestricted | FlagDecrypt | FlagUserWithAuth | FlagFixedParent | FlagFixedTPM | FlagSensitiveDataOrigin,
+		RSAParameters: &RSAParams{
+			Symmetric: &SymScheme{
+				Alg:     AlgAES,
+				KeyBits: 128,
+				Mode:    AlgCFB,
+			},
+			KeyBits: 2048,
+			Modulus: big.NewInt(0),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePrimary failed: %s", err)
+	}
+	defer FlushContext(rw, parentHandle)
+	privateBlob, publicBlob, err := CreateKey(rw, parentHandle, pcrSelection, defaultPassword, defaultPassword, Public{
+		Type:       AlgSymCipher,
+		NameAlg:    AlgKeyedHash,
+		Attributes: FlagDecrypt | FlagSign | FlagUserWithAuth | FlagFixedParent | FlagFixedTPM | FlagSensitiveDataOrigin,
+		SymCipherParameters: &SymCipherParams{
+			Symmetric: &SymScheme{
+				Alg:     AlgAES,
+				KeyBits: 128,
+				Mode:    AlgCFB,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateKey failed: %s", err)
+	}
+	key, _, err := Load(rw, parentHandle, defaultPassword, publicBlob, privateBlob)
+	if err != nil {
+		t.Fatalf("Load failed: %s", err)
+	}
+	defer FlushContext(rw, key)
+
+	// var key tpmutil.Handle // TODO
+
+	message := []byte("Shhh... it's a secret.")
+	got, err := HMAC(rw, key, message, AlgKeyedHash)
+	if err != nil {
+		t.Fatalf("HMAC failed: %v", err)
+	}
+
+	t.Errorf("Sam needs to finish implementing this. Got: %x", got) // TODO
+}
+
 func skipOnUnsupportedAlg(t testing.TB, rw io.ReadWriter, alg Algorithm) {
 	moreData := true
 	for i := uint32(0); moreData; i++ {
