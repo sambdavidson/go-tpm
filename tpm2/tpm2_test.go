@@ -386,11 +386,11 @@ func TestHMAC(t *testing.T) {
 	parentHandle, _, err := CreatePrimary(rw, HandleOwner, pcrSelection, emptyPassword, defaultPassword, Public{
 		Type:       AlgRSA,
 		NameAlg:    AlgSHA256,
-		Attributes: FlagRestricted | FlagDecrypt | FlagUserWithAuth | FlagFixedParent | FlagFixedTPM | FlagSensitiveDataOrigin,
+		Attributes: FlagRestricted | FlagDecrypt | FlagFixedTPM | FlagFixedParent | FlagSensitiveDataOrigin | FlagUserWithAuth,
 		RSAParameters: &RSAParams{
 			Symmetric: &SymScheme{
 				Alg:     AlgAES,
-				KeyBits: 128,
+				KeyBits: 256,
 				Mode:    AlgCFB,
 			},
 			KeyBits: 2048,
@@ -402,16 +402,9 @@ func TestHMAC(t *testing.T) {
 	}
 	defer FlushContext(rw, parentHandle)
 	privateBlob, publicBlob, err := CreateKey(rw, parentHandle, pcrSelection, defaultPassword, defaultPassword, Public{
-		Type:       AlgSymCipher,
-		NameAlg:    AlgKeyedHash,
-		Attributes: FlagDecrypt | FlagSign | FlagUserWithAuth | FlagFixedParent | FlagFixedTPM | FlagSensitiveDataOrigin,
-		SymCipherParameters: &SymCipherParams{
-			Symmetric: &SymScheme{
-				Alg:     AlgAES,
-				KeyBits: 128,
-				Mode:    AlgCFB,
-			},
-		},
+		Type:       AlgKeyedHash,
+		NameAlg:    AlgSHA256,
+		Attributes: FlagDecrypt | FlagSign | FlagFixedTPM | FlagFixedParent | FlagSensitiveDataOrigin | FlagUserWithAuth,
 	})
 	if err != nil {
 		t.Fatalf("CreateKey failed: %s", err)
@@ -425,7 +418,7 @@ func TestHMAC(t *testing.T) {
 	// var key tpmutil.Handle // TODO
 
 	message := []byte("Shhh... it's a secret.")
-	got, err := HMAC(rw, key, message, AlgKeyedHash)
+	got, err := HMAC(rw, defaultPassword, key, message, AlgKeyedHash)
 	if err != nil {
 		t.Fatalf("HMAC failed: %v", err)
 	}

@@ -1167,17 +1167,43 @@ func Hash(rw io.ReadWriter, alg Algorithm, buf []byte) ([]byte, error) {
 	return digest, nil
 }
 
-// HMAC computes a Hashed Message Authentication Code for the input data buf.
-func HMAC(rw io.ReadWriter, key tpmutil.Handle, buf []byte, alg Algorithm) ([]byte, error) {
-	resp, err := runCommand(rw, TagNoSessions, cmdHMAC, key, buf, alg)
+func encodeHMAC(keyAuth string, key tpmutil.Handle, buf []byte, alg Algorithm) ([]byte, error) {
+	ha, err := tpmutil.Pack(key)
 	if err != nil {
 		return nil, err
 	}
+	auth, err := encodeAuthArea(AuthCommand{Session: HandlePasswordSession, Attributes: AttrContinueSession, Auth: []byte(keyAuth)})
+	if err != nil {
+		return nil, err
+	}
+	// Use encryption key's mode.
+	params, err := tpmutil.Pack(buf, alg)
+	if err != nil {
+		return nil, err
+	}
+	return concat(ha, auth, params)
+}
+
+func decodeHMAC(in []byte) ([]byte, error) {
 	var digest []byte
-	if _, err = tpmutil.Unpack(resp, &digest); err != nil {
+	if _, err := tpmutil.Unpack(in, &digest); err != nil {
 		return nil, err
 	}
 	return digest, nil
+}
+
+// HMAC uses the keyed-hash message authentication code algorithm to compute a
+// keyed-hash of the data in buf.
+func HMAC(rw io.ReadWriter, keyAuth string, key tpmutil.Handle, buf []byte, alg Algorithm) ([]byte, error) {
+	cmd, err := encodeHMAC(keyAuth, key, buf, alg)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := runCommand(rw, TagSessions, cmdHMAC, tpmutil.RawBytes(cmd))
+	if err != nil {
+		return nil, err
+	}
+	return decodeHMAC(resp)
 }
 
 // Startup initializes a TPM (usually done by the OS).
